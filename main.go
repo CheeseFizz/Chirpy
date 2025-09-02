@@ -115,6 +115,7 @@ func (cfg *apiConfig) usersHandler(w http.ResponseWriter, r *http.Request) {
 		response.Error = "Something went wrong"
 	}
 
+	w.WriteHeader(201)
 	w.Write(dat)
 
 }
