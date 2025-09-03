@@ -120,6 +120,77 @@ func (cfg *apiConfig) usersHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
+func (cfg *apiConfig) chirpsHandler(w http.ResponseWriter, r *http.Request) {
+	type acceptFormat struct {
+		Body    string    `json:"body"`
+		User_id uuid.UUID `json:"user_id"`
+	}
+
+	naughty := []string{"kerfuffle", "sharbert", "fornax"}
+
+	// type Response struct {
+	// 	Error string `json:"error,omitempty"`
+	// 	Valid *bool  `json:"valid,omitempty"`
+	// }
+	type Response struct {
+		Error      string    `json:"error,omitempty"`
+		Id         uuid.UUID `json:"id,omitempty"`
+		Created_at time.Time `json:"created_at,omitempty"`
+		Updated_at time.Time `json:"updated_at,omitempty"`
+		Body       string    `json:"body,omitempty"`
+		User_id    uuid.UUID `json:"user_id,omitempty"`
+	}
+
+	var cleaned_body string
+
+	req := &acceptFormat{}
+	response := &Response{}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	err := parseRequestJson(r, req)
+	if err != nil {
+		response.Error = "Something went wrong"
+		w.WriteHeader(400)
+	} else {
+		if len(req.Body) > 140 {
+			response.Error = "Chirp is too long"
+			w.WriteHeader(400)
+		} else {
+			cleaned_body = req.Body
+			for _, word := range naughty {
+				rx := fmt.Sprintf(`(?i)%s`, word)
+				re := regexp.MustCompile(rx)
+				cleaned_body = re.ReplaceAllString(cleaned_body, "****")
+			}
+
+			chirpParams := database.CreateChripParams{
+				Body:   cleaned_body,
+				UserID: req.User_id,
+			}
+			chirp, err := cfg.Queries.CreateChrip(r.Context(), chirpParams)
+			if err != nil {
+				w.WriteHeader(500)
+				return
+			}
+			response.User_id = chirp.UserID
+			response.Body = chirp.Body
+			response.Created_at = chirp.CreatedAt
+			response.Updated_at = chirp.UpdatedAt
+			response.Id = chirp.ID
+		}
+	}
+
+	dat, err := json.Marshal(response)
+	if err != nil {
+		log.Printf("Error marshalling JSON: %s", err)
+		w.WriteHeader(500)
+	}
+
+	w.WriteHeader(201)
+	w.Write(dat)
+}
+
 // Helper functions
 func parseRequestJson[T any](r *http.Request, typestruct *T) error {
 	// Mutate typestruct with parsed data
@@ -145,55 +216,6 @@ func healthzHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(200)
 	w.Write(data)
-}
-
-func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
-	type acceptFormat struct {
-		Body string `json:"body"`
-	}
-
-	naughty := []string{"kerfuffle", "sharbert", "fornax"}
-
-	// type Response struct {
-	// 	Error string `json:"error,omitempty"`
-	// 	Valid *bool  `json:"valid,omitempty"`
-	// }
-	type Response struct {
-		Error        string `json:"error,omitempty"`
-		Cleaned_body string `json:"cleaned_body,omitempty"`
-	}
-
-	req := &acceptFormat{}
-	response := &Response{}
-
-	w.Header().Set("Content-Type", "application/json")
-
-	err := parseRequestJson(r, req)
-	if err != nil {
-		response.Error = "Something went wrong"
-		w.WriteHeader(400)
-	} else {
-		if len(req.Body) > 140 {
-			response.Error = "Chirp is too long"
-			w.WriteHeader(400)
-		} else {
-			response.Cleaned_body = req.Body
-			for _, word := range naughty {
-				rx := fmt.Sprintf(`(?i)%s`, word)
-				re := regexp.MustCompile(rx)
-				response.Cleaned_body = re.ReplaceAllString(response.Cleaned_body, "****")
-			}
-		}
-	}
-
-	dat, err := json.Marshal(response)
-	if err != nil {
-		log.Printf("Error marshalling JSON: %s", err)
-		w.WriteHeader(500)
-		response.Error = "Something went wrong"
-	}
-
-	w.Write(dat)
 }
 
 // Middleware that aren't methods
@@ -227,7 +249,7 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metricsHandler)
 	mux.HandleFunc("GET /api/healthz", healthzHandler)
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
-	mux.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
+	mux.HandleFunc("POST /api/chirps", apiCfg.chirpsHandler)
 	mux.HandleFunc("POST /api/users", apiCfg.usersHandler)
 
 	server := &http.Server{
