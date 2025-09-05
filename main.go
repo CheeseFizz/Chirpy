@@ -16,6 +16,7 @@ import (
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 
+	"github.com/CheeseFizz/Chirpy/internal/auth"
 	"github.com/CheeseFizz/Chirpy/internal/database"
 )
 
@@ -75,15 +76,15 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) usersHandler(w http.ResponseWriter, r *http.Request) {
 	type acceptFormat struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	type Response struct {
-		Error      string    `json:"error,omitempty"`
-		Id         uuid.UUID `json:"id,omitempty"`
-		Created_at time.Time `json:"created_at,omitempty"`
-		Updated_at time.Time `json:"updated_at,omitempty"`
-		Email      string    `json:"email,omitempty"`
+		Id         uuid.UUID `json:"id"`
+		Created_at time.Time `json:"created_at"`
+		Updated_at time.Time `json:"updated_at"`
+		Email      string    `json:"email"`
 	}
 
 	req := &acceptFormat{}
@@ -93,26 +94,38 @@ func (cfg *apiConfig) usersHandler(w http.ResponseWriter, r *http.Request) {
 
 	err := parseRequestJson(r, req)
 	if err != nil {
-		response.Error = "Something went wrong"
 		w.WriteHeader(400)
+		w.Write([]byte("{\"error\": \"Something went wrong\"}"))
+		return
+	}
+
+	hpw, err := auth.HashPassword(req.Password)
+	if err != nil {
+		log.Printf("Error hashing password: %s\n", err)
+		w.WriteHeader(500)
+		w.Write([]byte("{\"error\": \"Something went wrong\"}"))
+	}
+
+	userParams := database.CreateUserParams{
+		Email:          req.Email,
+		HashedPassword: hpw,
+	}
+	user, err := cfg.Queries.CreateUser(r.Context(), userParams)
+	if err != nil {
+		w.WriteHeader(400)
+		w.Write([]byte("{\"error\": \"Something went wrong\"}"))
 	} else {
-		user, err := cfg.Queries.CreateUser(r.Context(), req.Email)
-		if err != nil {
-			response.Error = "Something went wrong"
-			w.WriteHeader(400)
-		} else {
-			response.Email = user.Email
-			response.Id = user.ID
-			response.Created_at = user.CreatedAt
-			response.Created_at = user.UpdatedAt
-		}
+		response.Email = user.Email
+		response.Id = user.ID
+		response.Created_at = user.CreatedAt
+		response.Created_at = user.UpdatedAt
 	}
 
 	dat, err := json.Marshal(response)
 	if err != nil {
-		log.Printf("Error marshalling JSON: %s", err)
+		log.Printf("Error marshalling JSON: %s\n", err)
 		w.WriteHeader(500)
-		response.Error = "Something went wrong"
+		w.Write([]byte("{\"error\": \"Something went wrong\"}"))
 	}
 
 	w.WriteHeader(201)
@@ -191,6 +204,115 @@ func (cfg *apiConfig) chirpsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(dat)
 }
 
+func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	zero := make([]database.Chirp, 0)
+
+	chirps, err := cfg.Queries.GetChirps(r.Context())
+	if err != nil {
+		if err == sql.ErrNoRows {
+			w.WriteHeader(200)
+			chirps = zero
+		} else {
+			w.WriteHeader(500)
+			return
+		}
+	}
+	dat, err := json.Marshal(chirps)
+	if err != nil {
+		log.Printf("Error marshalling JSON: %s", err)
+		w.WriteHeader(500)
+	}
+
+	w.WriteHeader(200)
+	w.Write(dat)
+}
+
+func (cfg *apiConfig) getChirpHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	cid, err := uuid.Parse(r.PathValue("chirpID"))
+	if err != nil {
+		log.Printf("Error parsing: %s", err)
+		w.WriteHeader(500)
+		return
+	}
+	chirp, err := cfg.Queries.GetChirp(r.Context(), cid)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			w.WriteHeader(404)
+			return
+		} else {
+			w.WriteHeader(500)
+			return
+		}
+	}
+	dat, err := json.Marshal(chirp)
+	if err != nil {
+		log.Printf("Error marshalling JSON: %s", err)
+		w.WriteHeader(500)
+	}
+
+	w.WriteHeader(200)
+	w.Write(dat)
+}
+
+func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
+	type acceptFormat struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+
+	type Response struct {
+		Id         string    `json:"id"`
+		Created_at time.Time `json:"created_at"`
+		Updated_at time.Time `json:"updated_at"`
+		Email      string    `json:"email"`
+	}
+
+	req := &acceptFormat{}
+	response := &Response{}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	err := parseRequestJson(r, req)
+	if err != nil {
+		w.WriteHeader(401)
+		w.Write([]byte("Incorrect email or password"))
+		return
+	}
+
+	user, err := cfg.Queries.GetUserByEmail(r.Context(), req.Email)
+	if err != nil {
+		w.WriteHeader(401)
+		w.Write([]byte("Incorrect email or password"))
+		return
+	}
+
+	err = auth.CheckPasswordHash(req.Password, user.HashedPassword)
+	if err != nil {
+		w.WriteHeader(401)
+		w.Write([]byte("Incorrect email or password"))
+		return
+	}
+
+	response.Id = user.ID.String()
+	response.Created_at = user.CreatedAt
+	response.Updated_at = user.UpdatedAt
+	response.Email = user.Email
+
+	dat, err := json.Marshal(response)
+	if err != nil {
+		log.Printf("Error marshalling JSON: %s", err)
+		w.WriteHeader(500)
+	}
+
+	w.WriteHeader(200)
+	w.Write(dat)
+
+}
+
 // Helper functions
 func parseRequestJson[T any](r *http.Request, typestruct *T) error {
 	// Mutate typestruct with parsed data
@@ -225,6 +347,12 @@ func middlewareLog(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+func middlewareFuncLog(next http.HandlerFunc) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("%s %s", r.Method, r.URL.Path)
+		next(w, r)
+	})
+}
 
 // Setup and run server
 func main() {
@@ -246,11 +374,14 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(appHandler))
-	mux.HandleFunc("GET /admin/metrics", apiCfg.metricsHandler)
-	mux.HandleFunc("GET /api/healthz", healthzHandler)
-	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
-	mux.HandleFunc("POST /api/chirps", apiCfg.chirpsHandler)
-	mux.HandleFunc("POST /api/users", apiCfg.usersHandler)
+	mux.HandleFunc("GET /admin/metrics", middlewareFuncLog(apiCfg.metricsHandler))
+	mux.HandleFunc("GET /api/healthz", middlewareFuncLog(healthzHandler))
+	mux.HandleFunc("POST /admin/reset", middlewareFuncLog(apiCfg.resetHandler))
+	mux.HandleFunc("POST /api/chirps", middlewareFuncLog(apiCfg.chirpsHandler))
+	mux.HandleFunc("GET /api/chirps", middlewareFuncLog(apiCfg.getChirpsHandler))
+	mux.HandleFunc("GET /api/chirps/{chirpID}", middlewareFuncLog(apiCfg.getChirpHandler))
+	mux.HandleFunc("POST /api/users", middlewareFuncLog(apiCfg.usersHandler))
+	mux.HandleFunc("POST /api/login", middlewareFuncLog(apiCfg.loginHandler))
 
 	server := &http.Server{
 		Addr:    ":" + port,
