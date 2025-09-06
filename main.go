@@ -25,6 +25,7 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	Queries        *database.Queries
+	Secret         string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -135,8 +136,7 @@ func (cfg *apiConfig) usersHandler(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) chirpsHandler(w http.ResponseWriter, r *http.Request) {
 	type acceptFormat struct {
-		Body    string    `json:"body"`
-		User_id uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
 	}
 
 	naughty := []string{"kerfuffle", "sharbert", "fornax"}
@@ -146,12 +146,11 @@ func (cfg *apiConfig) chirpsHandler(w http.ResponseWriter, r *http.Request) {
 	// 	Valid *bool  `json:"valid,omitempty"`
 	// }
 	type Response struct {
-		Error      string    `json:"error,omitempty"`
-		Id         uuid.UUID `json:"id,omitempty"`
-		Created_at time.Time `json:"created_at,omitempty"`
-		Updated_at time.Time `json:"updated_at,omitempty"`
-		Body       string    `json:"body,omitempty"`
-		User_id    uuid.UUID `json:"user_id,omitempty"`
+		Id         uuid.UUID `json:"id"`
+		Created_at time.Time `json:"created_at"`
+		Updated_at time.Time `json:"updated_at"`
+		Body       string    `json:"body"`
+		User_id    uuid.UUID `json:"user_id"`
 	}
 
 	var cleaned_body string
@@ -161,43 +160,57 @@ func (cfg *apiConfig) chirpsHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 
-	err := parseRequestJson(r, req)
+	token, err := auth.GetBearerToken(r.Header)
 	if err != nil {
-		response.Error = "Something went wrong"
-		w.WriteHeader(400)
-	} else {
-		if len(req.Body) > 140 {
-			response.Error = "Chirp is too long"
-			w.WriteHeader(400)
-		} else {
-			cleaned_body = req.Body
-			for _, word := range naughty {
-				rx := fmt.Sprintf(`(?i)%s`, word)
-				re := regexp.MustCompile(rx)
-				cleaned_body = re.ReplaceAllString(cleaned_body, "****")
-			}
-
-			chirpParams := database.CreateChripParams{
-				Body:   cleaned_body,
-				UserID: req.User_id,
-			}
-			chirp, err := cfg.Queries.CreateChrip(r.Context(), chirpParams)
-			if err != nil {
-				w.WriteHeader(500)
-				return
-			}
-			response.User_id = chirp.UserID
-			response.Body = chirp.Body
-			response.Created_at = chirp.CreatedAt
-			response.Updated_at = chirp.UpdatedAt
-			response.Id = chirp.ID
-		}
+		w.WriteHeader(401)
+		return
 	}
+	user_id, err := auth.ValidateJWT(token, cfg.Secret)
+	if err != nil {
+		w.WriteHeader(401)
+		return
+	}
+
+	err = parseRequestJson(r, req)
+	if err != nil {
+		w.WriteHeader(400)
+		w.Write([]byte("Something went wrong"))
+		return
+	}
+
+	if len(req.Body) > 140 {
+		w.WriteHeader(400)
+		w.Write([]byte("Chirp is too long"))
+		return
+	}
+
+	cleaned_body = req.Body
+	for _, word := range naughty {
+		rx := fmt.Sprintf(`(?i)%s`, word)
+		re := regexp.MustCompile(rx)
+		cleaned_body = re.ReplaceAllString(cleaned_body, "****")
+	}
+
+	chirpParams := database.CreateChripParams{
+		Body:   cleaned_body,
+		UserID: user_id,
+	}
+	chirp, err := cfg.Queries.CreateChrip(r.Context(), chirpParams)
+	if err != nil {
+		w.WriteHeader(500)
+		return
+	}
+	response.User_id = chirp.UserID
+	response.Body = chirp.Body
+	response.Created_at = chirp.CreatedAt
+	response.Updated_at = chirp.UpdatedAt
+	response.Id = chirp.ID
 
 	dat, err := json.Marshal(response)
 	if err != nil {
 		log.Printf("Error marshalling JSON: %s", err)
 		w.WriteHeader(500)
+		return
 	}
 
 	w.WriteHeader(201)
@@ -260,8 +273,9 @@ func (cfg *apiConfig) getChirpHandler(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 	type acceptFormat struct {
-		Password string `json:"password"`
-		Email    string `json:"email"`
+		Password           string `json:"password"`
+		Email              string `json:"email"`
+		Expires_in_seconds int    `json:"expires_in_seconds"`
 	}
 
 	type Response struct {
@@ -269,6 +283,7 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		Created_at time.Time `json:"created_at"`
 		Updated_at time.Time `json:"updated_at"`
 		Email      string    `json:"email"`
+		Token      string    `json:"token"`
 	}
 
 	req := &acceptFormat{}
@@ -297,15 +312,28 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Expires_in_seconds == 0 || req.Expires_in_seconds > 3600 {
+		req.Expires_in_seconds = 3600
+	}
+
+	token, err := auth.MakeJWT(user.ID, cfg.Secret, time.Duration(req.Expires_in_seconds)*time.Second)
+	if err != nil {
+		log.Printf("loginHandler: error getting token: %v", err)
+		w.WriteHeader(500)
+		return
+	}
+
 	response.Id = user.ID.String()
 	response.Created_at = user.CreatedAt
 	response.Updated_at = user.UpdatedAt
 	response.Email = user.Email
+	response.Token = token
 
 	dat, err := json.Marshal(response)
 	if err != nil {
 		log.Printf("Error marshalling JSON: %s", err)
 		w.WriteHeader(500)
+		return
 	}
 
 	w.WriteHeader(200)
@@ -356,7 +384,10 @@ func middlewareFuncLog(next http.HandlerFunc) http.HandlerFunc {
 
 // Setup and run server
 func main() {
+	// Load environment variables
 	godotenv.Load()
+
+	// Connect database
 	dbURL := os.Getenv("DB_URL")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -364,10 +395,15 @@ func main() {
 	}
 	dbQueries := database.New(db)
 
+	// Setup apiConfig
+	apiCfg := &apiConfig{
+		Queries: dbQueries,
+		Secret:  os.Getenv("SECRET"),
+	}
+
+	// Setup Services and Server Mux
 	port := "8080"
 	filepathRoot := http.Dir(".")
-
-	apiCfg := &apiConfig{Queries: dbQueries}
 
 	fserver := http.FileServer(filepathRoot)
 	appHandler := http.StripPrefix("/app", fserver)
