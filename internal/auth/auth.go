@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
@@ -78,4 +80,28 @@ func GetBearerToken(headers http.Header) (string, error) {
 	token = strings.Trim(token, " ")
 
 	return token, nil
+}
+
+func MakeRefreshToken() (string, error) {
+	rbytes := make([]byte, 32)
+	_, err := rand.Read(rbytes)
+	if err != nil {
+		return "", err
+	}
+
+	rstr := hex.EncodeToString(rbytes)
+
+	return rstr, nil
+}
+
+func GetAPIKey(headers http.Header) (string, error) {
+	apikey_string, ok := headers["Authorization"]
+	if !ok {
+		return "", fmt.Errorf("no token in header")
+	}
+	apikey := strings.Join(apikey_string, "")
+	apikey = strings.ReplaceAll(apikey, "ApiKey", "")
+	apikey = strings.Trim(apikey, " ")
+
+	return apikey, nil
 }

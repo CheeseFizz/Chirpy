@@ -7,4 +7,7 @@ sql:
       go:
         emit_json_tags: true
         json_tags_case_style: snake
+        overrides:
+          - column: "users.hashed_password"
+            go_struct_tag: 'json:"-"'
         out: "internal/database"
